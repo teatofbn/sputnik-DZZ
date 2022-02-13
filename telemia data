@@ -1,0 +1,223 @@
+#! /usr/bin/env python
+# -*- coding: utf-8 -*-
+import sys
+
+from schsat import *
+from time import sleep, time
+from multiprocessing import Process
+
+
+# Globals
+_A = -1
+_P = []
+
+LSS_OK  = 0
+LSS_ERROR = 1
+LSS_BREAK = 2
+def control(): # Основная функция программы, в которой нужно вызывать остальные функции
+	sun_result = [0,0,0] # Инициализируем sun_result
+	num = 1
+	print "Enable sun sensor №", num
+	sun_sensor_turn_on(num)
+	print "Get RAW data from sun sensor"    
+	
+	hyro_result = [0,0,0,0] # Инициализируем hyro_result
+	num = 1 # Номер Датчика угловой скорости
+	print "Enable angular velocity sensor №", num
+	hyro_turn_on(num) # Включаем ДУС
+	print "Get RAW data from angular velocity sensor"
+	
+	mgn_result = [0,0,0,0] # Инициализируем mgn_result
+	num = 1  # номер магнитометра
+	print "Enable magnetometer №", num
+	magnetometer_turn_on(num)
+	sleep(2)
+	print "Get RAW data from magnetometer" 
+ 
+	for i in range(10):
+		sun_result = sun_sensor_request_raw(num)
+		hyro_result = hyro_request_raw(num) #записываем ответ функции
+		mgn_result = magnetometer_request_raw(num)
+		
+		if not sun_result[0]: # если датчик вернул сообщение об ошибке,
+			print "state:", sun_result[0], "raw =", sun_result[1], \
+				sun_result[2], "sun_result"
+		elif sun_result[0] == 1:
+			print "Fail because of access error, check the connection" 
+		elif sun_result[0] == 2:
+			print "Fail because of interface error, check your code"
+		# hyro_request_raw в переменную hyro_result
+		
+		if not hyro_result[0]: # если датчик не вернул сообщение об ошибке,
+			print "state:", hyro_result[0], "x_raw =", hyro_result[1], \
+				"y_raw =", hyro_result[2], "z_raw =", hyro_result[3], "hyro_result"
+				# Выводим данные
+		elif hyro_result[0] == 1: # если датчик вернул сообщение об ошибке 1
+			print "Fail because of access error, check the connection (hyro_result)"
+		elif hyro_result[0] == 2: # если датчик вернул сообщение об ошибке 2
+			print "Fail because of interface error, check your code(hyro_result)"
+			
+		if not mgn_result[0]: # если датчик вернул сообщение об ошибке,
+			print "state:", mgn_result[0], "x_raw =", mgn_result[1], \
+				"y_raw =", mgn_result[2], "z_raw =", mgn_result[3] , "mgn_result"
+				# Обратите внимание на символ переноса строки!
+		elif mgn_result[0] == 1:
+			print "Fail because of access error, check the connection (mgn)"
+		elif mgn_result[0] == 2:
+			print "Fail because of interface error, check your code (mgn)"
+ 
+		sleep(2)
+		
+	print "Disable angular velocity sensor №", num
+	hyro_turn_off(num)   # Выключаем ДУС
+	
+	print "Disable sun sensor №", num
+	sun_sensor_turn_off(num)
+	
+	print "Disable magnetometer №", num
+	magnetometer_turn_off(num)
+
+def _control():
+    global _A
+    accumulator_attach(_A)
+    try:
+        control()
+    except KeyboardInterrupt:
+        Exit()
+    accumulator_detach()
+    print "Finish mission"
+    Exit()
+
+
+def _battery():
+    global _A
+    accumulator_attach(_A)
+    try:
+        accumulator()
+    except KeyboardInterrupt:
+        Exit()
+    accumulator_detach()
+    print 'Die! Accumulator has been discharged!'
+    Exit()
+
+
+def Exit():
+    global _P
+    for p in _P:
+        try: p.terminate()
+        except: pass
+
+
+def usage(prg):
+    print "Usage: %s [options] <tty>" % prg;
+    print "  (use CTRL-C to terminate program)"
+    print ""
+    print "Options:"
+    print "  -N <value>\t\t(number of cells in battery, default is %d)" % cvar.ncells
+    print "  -X \t\t\t(do not poll sun battery for charging)"
+    print "  -b <value>\t\t(set baudrate, default is %d)" % cvar.G.baud
+    print "  -c <value>\t\t(charge of accumulator, default is %.1fAH)" % cvar.G.charge
+    print "  -d\t\t\t(increment level for debug messages)"
+    print "  -f <value>\t\t(FTP, default is %s)" % cvar.ftp_path
+    print "  -i <value>\t\t(discharge current, default is %.1fmA)" % cvar.G.current
+    print "  -n <value>\t\t(number of retries, default is %d)" % cvar.G.retries
+    print "  -t <value>\t\t(set i/o timeout, default is %dmS)" % cvar.G.timeout
+    print "  -v\t\t\t(show build information and exit)"
+    print "  -z <value>\t\t(buzz server, default is %s)" % cvar.G.buzz_server
+    print ""
+
+    sys.exit(1)
+
+
+def main():
+    import getopt
+
+    global _A
+    global _P
+
+    # websocketd needs this
+    sys.stderr = sys.stdout
+
+    prg = sys.argv[0]
+
+    if not cvar.G.buzz_server:
+        cvar.G.buzz_server = '192.168.42.42'
+
+    if not cvar.ftp_path:
+        cvar.ftp_path = 'ftp://192.168.42.42/incoming'
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "hN:Xb:c:df:i:n:t:z:v")
+    except getopt.GetoptError as err:
+        print str(err)
+        usage(sys.argv[0])
+
+    for o, a in opts:
+        if o == "-h":
+            usage(prg)
+        elif o == "-N":
+            cvar.ncells = int(a)
+        elif o == "-X":
+            cvar.donotpollsunbattery = 1
+        elif o == "-b":
+            cvar.G.baud = int(a)
+        elif o == "-c":
+            cvar.G.charge = float(a)
+        elif o == "-d":
+            cvar.debug += 1
+        elif o == "-f":
+            cvar.ftp_path = a
+        elif o == "-i":
+            cvar.G.current = float(a)
+        elif o == "-n":
+            cvar.G.retries = int(a)
+        elif o == "-t":
+            cvar.G.timeout = int(a)
+        elif o == "-v":
+            version(prg)
+            sys.exit(0)
+        elif o == "-z":
+            cvar.G.buzz_server = a
+        else:
+            assert False, "unhandled option"
+
+    if len(args) != 1:
+        usage(prg)
+
+    tty = args[0]
+
+    online(tty)
+
+    version(prg)
+
+    buzz("The %s says 'HELLO' to %s:%d\n" % (prg, cvar.G.buzz_server, cvar.G.buzz_port))
+
+    _A = accumulator_create(prg)
+
+    accumulator_attach(_A)
+    battery_set_charge(cvar.G.charge)
+    battery_set_charge_limit(cvar.G.charge)
+    battery_set_discharging_current(cvar.G.current + cvar.G.fRaspberryConsumption)
+    accumulator_detach()
+
+    p = Process(target=_battery)
+    p.Daemon = 1
+    p.start()
+
+    _P.append(p)
+
+    p = Process(target=_control)
+    p.Daemon = 1
+    p.start()
+
+    _P.append(p)
+
+    for p in _P:
+        p.join()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        Exit()
