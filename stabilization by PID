@@ -1,0 +1,340 @@
+#! /usr/bin/env python
+# -*- coding: utf-8 -*-
+import sys
+
+from schsat import *
+from time import sleep, time
+from multiprocessing import Process
+
+
+# Globals
+_A = -1
+_P = []
+
+LSS_OK  = 0
+LSS_ERROR = 1
+LSS_BREAK = 2
+import math
+ 
+time_step = 0.1		# Временной шаг работы алгоритма, с
+omega_goal = 0.0 	# Целевая угловая скорость спутника, град/с. Для режима стабилизации равна 0.0.
+alpha_goal = 0		# Целевой угол поворота
+mtr_max_speed = 5000 	# Максимально допустимая скорость маховика, об/мин
+mtr_num = 1		# Номер маховика
+hyr_num = 1		# Номер ДУС
+mag_num = 1		# Номер магнитометра
+ 
+ 
+errora = 0           	# Ошибка по углу
+Pa =0# Воздействие пропорционального звена
+Da = 0        		# Воздействие дифференциального звена
+Ia = 0         		# Воздействие интегрального звена
+Kpa = 200		# Пропорциональный коэфициент ошибки по углу
+Kda = 0.02           	# Дифференциальный коэффициент
+Kia = 0.5            	# Интегральный коэффициент
+lastErrora = 0       	# Прошлая ошибка по углу
+Integratora = 0      	# Интеграл (сумма всех ошибок по углу)
+PID_alpha = 0 		# Величина управляющего воздействия
+Integrator_maxa = 10	# Ограничение максимального значения интергатора
+Integrator_mina = -10	# Ограничение минимального значения интергатора
+ 
+error = 0          	# Ошибка по угловой скорости
+P = 0         		# Воздействие пропорционального звена
+D = 0         		# Воздействие дифференциального звена
+I = 0         		# Воздействие интегрального звена
+Kp = 200            	# Пропорциональный коэффициент
+Kd = 0.02           	# Дифференциальный коэффициент
+Ki = 0.5            	# Интегральный коэффициент
+lastError = 0       	# Прошлая ошибка по угловой скорости
+Integrator = 0      	# Интеграл (сумма всех ошибок по угловой скорости)
+PID_omega = 0       	# Величина управляющего воздействия
+Integrator_max = 10  	# Ограничение максимального значения интергатора
+Integrator_min = -10 	# Ограничение минимального значения интергатора
+ 
+# Функция mag_calibrated вносит поправки в показания магнитометра с учетом калибровочных коэффициентов
+def mag_calibrated(magx,magy,magz):
+	magx_cal = 1.498533*(magx + -113.850679) + -0.008529*(magy + -101.910129) + 0.158159*(magz + 10.363622)
+	magy_cal = -0.008529*(magx + -113.850679) + 1.731124*(magy + -101.910129) + 0.111524*(magz + 10.363622)
+	magz_cal = 0.158159*(magx + -113.850679) + 0.111524*(magy + -101.910129) + 1.655456*(magz + 10.363622)
+	return magx_cal, magy_cal, magz_cal
+ 
+# Функции для определение новой скорости маховика.
+# Новая скорость маховика складывается из
+# текущей скорости маховика mtr_speed и приращения скорости PID
+# Приращение скорости получено путем сложения трех коэффициентов
+# P - пропорциональный коэффициент регулятора
+# I - интегральный коэффициент регулятора
+# D - дифференциальный коэффициент регулятора
+# Integrator накапливает суммарную ошибку
+# Сатуратор ограничивает максимальную величину суммарной ошибки
+# mtr_speed - текущая угловая скорость маховика, об/мин
+# omega - текущая угловая скорость спутника, град/с
+# omega_goal - целевая угловая скорость спутника, град/с
+# mtr_new_speed - требуемая угловая скорость маховика, об/мин
+def motor_new_speed_PD(mtr_speed, alpha, alpha_goal, omega, omega_goal):
+	global Integrator
+	global lastError
+	global Integratora
+	global lastErrora	
+ 
+	error = omega - omega_goal           		# Вычисление ошибки
+	P = Kp * error                       		# Вычисление воздействия пропорционального звена
+	D = Kd * (error - lastError) / time_step	# Вычисление воздействия дифференциального звена
+	lastError = error                    		# Запоминаем ошибку
+	Integrator = Integrator + error * time_step # Накапливаем суммарную ошибку
+	if Integrator > Integrator_max:         	# Сатурация (Ограничиваем максимальное значение накапливаемой ошибки)
+		Integrator = Integrator_max
+	elif Integrator < Integrator_min:
+		Integrator = Integrator_min
+	I = Integrator * Ki             # Вычисление воздействия интегрального звена
+	PID_omega = P + I + D     		# Вычисление суммарного управляющего воздействия
+ 
+	errora = alpha - alpha_goal           		# Вычисление ошибки
+	Pa = Kpa * errora                       		# Вычисление воздействия пропорционального звена
+	Da = Kda * (errora - lastErrora) / time_step	# Вычисление воздействия дифференциального звена
+	lastErrora = errora                    		# Запоминаем ошибку
+	Integratora = Integratora + errora * time_step # Накапливаем суммарную ошибку
+	if Integratora > Integrator_maxa:         	# Сатурация (Ограничиваем максимальное значение накапливаемой ошибки)
+		Integratora = Integrator_maxa
+	elif Integratora < Integrator_mina:
+		Integratora = Integrator_mina
+	Ia = Integratora * Kia             # Вычисление воздействия интегрального звена
+	PID_alpha = Pa + Ia + Da     		# Вычисление суммарного управляющего воздействия	
+ 
+	mtr_new_speed = int(mtr_speed + PID_omega + PID_alpha)
+	if mtr_new_speed > mtr_max_speed:
+		mtr_new_speed = mtr_max_speed
+	elif mtr_new_speed < -mtr_max_speed:
+		mtr_new_speed = -mtr_max_speed
+	print "P= ", P, "I= ", I, "D= ", D, "PID_omega= ", PID_omega, "PID_alpha=", PID_alpha, "mtr_new_speed= ", mtr_new_speed  
+	print "Pa= ", Pa, "Ia= ", Ia, "Da= ", Da, "PID_alpha=", PID_alpha
+	return mtr_new_speed
+ 
+ 
+# Функция включает все приборы,
+# которые будут использоваться в основной программе.
+def initialize_all(): # Функция инициализации всех систем
+	print "Enable motor №", mtr_num 
+	motor_turn_on(mtr_num)
+	sleep(1)
+	print "Enable angular velocity sensor №", hyr_num 
+	hyro_turn_on(hyr_num) # Включаем ДУС
+	sleep(1)
+	print "Enable magnetometer", mag_num
+	magnetometer_turn_on(mag_num)
+	sleep(1)
+ 
+def switch_off_all(): # Функция выключения всех систем
+	print "Finishing..."
+	print "Disable angular velocity sensor №", hyr_num
+	hyro_turn_off(hyr_num)   # Выключаем ДУС
+	print "Disable magnetometer", mag_num
+	magnetometer_turn_off(mag_num)
+	motor_set_speed(mtr_num, 0)
+	sleep (1)
+	motor_turn_off(mtr_num)
+	print "Finish program"
+ 
+ 
+# Основная функция программы, в которой вызываются остальные функции.
+def control():
+	initialize_all()
+	mtr_state = 0		# Инициализируем статус маховика
+	hyro_state = 0 		# Инициализируем статус ДУС
+	mag_state = 0 		# Инициализируем статус магнитометра
+	alpha_goal = 0		# Целевой угол
+	omega_goal = 50 		# Целевая угловая скорость
+	mag_alpha = 0
+ 
+	for i in range(1000):
+		#print "i = ", i
+ 
+		# Опрос датчика угловой скорости и маховика.
+		mag_state, magx_raw, magy_raw, magz_raw = magnetometer_request_raw(mag_num)
+		hyro_state, gx_raw, gy_raw, gz_raw = hyro_request_raw(hyr_num) 
+		mtr_state, mtr_speed = motor_request_speed(mtr_num)		
+ 
+		if not mag_state: # если магнитометр вернул код ошибки 0, т.е. ошибки нет
+			magx_cal, magy_cal, magz_cal = mag_calibrated(magx_raw,magy_raw,magz_raw)
+			magy_cal = - magy_cal	# переходим из левой системы координат, которая изображена на магнитометре в правую
+			mag_alpha = math.atan2(magy_cal, magx_cal)/math.pi*180
+			#mag_alpha = angle_transformation(mag_alpha, alpha_goal)
+			#print "magx_cal =", magx_cal, "magy_cal =", magy_cal, "magz_cal =", magz_cal # Вывод откалиброванных значений магнитометра
+			print "mag_alpha atan2= ", mag_alpha
+		elif mag_state == 1:
+			print "Fail because of access error, check the connection"
+		elif mag_state == 2:
+			print "Fail because of interface error, check your code"
+ 
+		# Обработка показаний датчика угловой скорости,
+		# вычисление угловой скорости спутника по показаниям ДУС.
+		# Если код ошибки ДУС равен 0, т.е. ошибки нет
+		if not hyro_state:
+			gx_degs = gx_raw * 0.00875
+			gy_degs = gy_raw * 0.00875
+			gz_degs = gz_raw * 0.00875
+			# если ДУС установлен осью z вверх, то угловая скорость
+			# спутника совпадает с показаниями ДУС по оси z, иначе
+			# необходимо изменить знак: omega = - gz_degs
+			omega = gz_degs
+			#print "gx_degs =", gx_degs, "gy_degs =", gy_degs, "gz_degs =", gz_degs
+		elif hyro_state == 1:
+			print "Fail because of access error, check the connection"
+		elif hyro_state == 2:
+			print "Fail because of interface error, check your code"
+ 
+		#Обработка показаний маховика и установка требуемой угловой скорости.
+		if not mtr_state:	# если код ошибки 0, т.е. ошибки нет
+			print "Motor_speed: ", mtr_speed
+			# установка новой скорости маховика
+			mtr_new_speed = motor_new_speed_PD(mtr_speed, mag_alpha, alpha_goal, omega, omega_goal)
+			motor_set_speed(mtr_num, mtr_new_speed)
+ 
+		sleep(time_step)
+ 
+	switch_off_all()
+
+def _control():
+    global _A
+    accumulator_attach(_A)
+    try:
+        control()
+    except KeyboardInterrupt:
+        Exit()
+    accumulator_detach()
+    print "Finish mission"
+    Exit()
+
+
+def _battery():
+    global _A
+    accumulator_attach(_A)
+    try:
+        accumulator()
+    except KeyboardInterrupt:
+        Exit()
+    accumulator_detach()
+    print 'Die! Accumulator has been discharged!'
+    Exit()
+
+
+def Exit():
+    global _P
+    for p in _P:
+        try: p.terminate()
+        except: pass
+
+
+def usage(prg):
+    print "Usage: %s [options] <tty>" % prg;
+    print "  (use CTRL-C to terminate program)"
+    print ""
+    print "Options:"
+    print "  -N <value>\t\t(number of cells in battery, default is %d)" % cvar.ncells
+    print "  -X \t\t\t(do not poll sun battery for charging)"
+    print "  -b <value>\t\t(set baudrate, default is %d)" % cvar.G.baud
+    print "  -c <value>\t\t(charge of accumulator, default is %.1fAH)" % cvar.G.charge
+    print "  -d\t\t\t(increment level for debug messages)"
+    print "  -f <value>\t\t(FTP, default is %s)" % cvar.ftp_path
+    print "  -i <value>\t\t(discharge current, default is %.1fmA)" % cvar.G.current
+    print "  -n <value>\t\t(number of retries, default is %d)" % cvar.G.retries
+    print "  -t <value>\t\t(set i/o timeout, default is %dmS)" % cvar.G.timeout
+    print "  -v\t\t\t(show build information and exit)"
+    print "  -z <value>\t\t(buzz server, default is %s)" % cvar.G.buzz_server
+    print ""
+
+    sys.exit(1)
+
+
+def main():
+    import getopt
+
+    global _A
+    global _P
+
+    # websocketd needs this
+    sys.stderr = sys.stdout
+
+    prg = sys.argv[0]
+
+    if not cvar.G.buzz_server:
+        cvar.G.buzz_server = '192.168.42.42'
+
+    if not cvar.ftp_path:
+        cvar.ftp_path = 'ftp://192.168.42.42/incoming'
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "hN:Xb:c:df:i:n:t:z:v")
+    except getopt.GetoptError as err:
+        print str(err)
+        usage(sys.argv[0])
+
+    for o, a in opts:
+        if o == "-h":
+            usage(prg)
+        elif o == "-N":
+            cvar.ncells = int(a)
+        elif o == "-X":
+            cvar.donotpollsunbattery = 1
+        elif o == "-b":
+            cvar.G.baud = int(a)
+        elif o == "-c":
+            cvar.G.charge = float(a)
+        elif o == "-d":
+            cvar.debug += 1
+        elif o == "-f":
+            cvar.ftp_path = a
+        elif o == "-i":
+            cvar.G.current = float(a)
+        elif o == "-n":
+            cvar.G.retries = int(a)
+        elif o == "-t":
+            cvar.G.timeout = int(a)
+        elif o == "-v":
+            version(prg)
+            sys.exit(0)
+        elif o == "-z":
+            cvar.G.buzz_server = a
+        else:
+            assert False, "unhandled option"
+
+    if len(args) != 1:
+        usage(prg)
+
+    tty = args[0]
+
+    online(tty)
+
+    version(prg)
+
+    buzz("The %s says 'HELLO' to %s:%d\n" % (prg, cvar.G.buzz_server, cvar.G.buzz_port))
+
+    _A = accumulator_create(prg)
+
+    accumulator_attach(_A)
+    battery_set_charge(cvar.G.charge)
+    battery_set_charge_limit(cvar.G.charge)
+    battery_set_discharging_current(cvar.G.current + cvar.G.fRaspberryConsumption)
+    accumulator_detach()
+
+    p = Process(target=_battery)
+    p.Daemon = 1
+    p.start()
+
+    _P.append(p)
+
+    p = Process(target=_control)
+    p.Daemon = 1
+    p.start()
+
+    _P.append(p)
+
+    for p in _P:
+        p.join()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        Exit()
